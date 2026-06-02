@@ -1,3 +1,3 @@
 module github.com/robo358/netstress-k8s
 
-go 1.22
+go 1.26
