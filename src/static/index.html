@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>netstress</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>netstress</h1>
+    <p class="subtitle">Network stress tester for yh-cluster</p>
+  </header>
+
+  <main>
+    <section class="config">
+      <label for="size">Test size</label>
+      <select id="size">
+        <option value="25">25 MB</option>
+        <option value="50">50 MB</option>
+        <option value="100" selected>100 MB</option>
+        <option value="250">250 MB</option>
+      </select>
+      <button id="btn-all" class="btn btn-primary">Run All Tests</button>
+    </section>
+
+    <section class="cards">
+      <div class="card" id="card-ping">
+        <div class="card-label">Latency</div>
+        <div class="card-value" id="val-ping">—</div>
+        <div class="card-unit">ms</div>
+        <button class="btn" id="btn-ping">Ping</button>
+      </div>
+
+      <div class="card" id="card-dl">
+        <div class="card-label">Download</div>
+        <div class="card-value" id="val-dl">—</div>
+        <div class="card-unit">Mbps</div>
+        <progress id="prog-dl" max="100" value="0"></progress>
+        <button class="btn" id="btn-dl">Test</button>
+      </div>
+
+      <div class="card" id="card-ul">
+        <div class="card-label">Upload</div>
+        <div class="card-value" id="val-ul">—</div>
+        <div class="card-unit">Mbps</div>
+        <progress id="prog-ul" max="100" value="0"></progress>
+        <button class="btn" id="btn-ul">Test</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

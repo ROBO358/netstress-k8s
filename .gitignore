@@ -7,6 +7,8 @@
 
 # Go
 /bin/
+src/netstress
+src/netstress-k8s
 *.exe
 *.test
 *.out
