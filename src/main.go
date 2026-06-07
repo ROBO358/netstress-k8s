@@ -38,34 +38,48 @@ func handlePing(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleDownload(w http.ResponseWriter, r *http.Request) {
+	unlimited := false
 	mb := 100
 	if s := r.URL.Query().Get("size"); s != "" {
-		if n, err := strconv.Atoi(s); err == nil && n > 0 && n <= 1000 {
+		if s == "0" {
+			unlimited = true
+		} else if n, err := strconv.Atoi(s); err == nil && n > 0 && n <= 100000 {
 			mb = n
 		}
 	}
 
-	total := int64(mb) * 1024 * 1024
-
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.FormatInt(total, 10))
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	total := int64(mb) * 1024 * 1024
+	if !unlimited {
+		w.Header().Set("Content-Length", strconv.FormatInt(total, 10))
+	}
 
 	const chunkSize = 64 * 1024
 	buf := make([]byte, chunkSize)
 	rand.Read(buf)
 
-	var written int64
-	for written < total {
+	flusher, canFlush := w.(http.Flusher)
+	written := int64(0)
+	for {
+		if !unlimited && written >= total {
+			break
+		}
 		n := int64(chunkSize)
-		if remaining := total - written; remaining < n {
-			n = remaining
+		if !unlimited {
+			if rem := total - written; rem < n {
+				n = rem
+			}
 		}
 		nw, err := w.Write(buf[:n])
 		written += int64(nw)
 		if err != nil {
 			return
+		}
+		if canFlush && unlimited {
+			flusher.Flush()
 		}
 	}
 }
