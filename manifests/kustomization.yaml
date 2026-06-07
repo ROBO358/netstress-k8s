@@ -4,14 +4,14 @@ kind: Kustomization
 namespace: netstress
 
 resources:
-  - certificate.yaml
-  - deployment.yaml
-  - service.yaml
-  - gateway.yaml
-  - httproute.yaml
-  - httproute-tunnel.yaml
-  - ciliumnetworkpolicy.yaml
+- certificate.yaml
+- deployment.yaml
+- service.yaml
+- gateway.yaml
+- httproute.yaml
+- httproute-tunnel.yaml
+- ciliumnetworkpolicy.yaml
 
 images:
-  - name: ghcr.io/robo358/netstress-k8s
-    newTag: main
+- name: ghcr.io/robo358/netstress-k8s
+  newTag: sha-5a54a1c
