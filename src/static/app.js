@@ -200,6 +200,18 @@ async function runDownload(signal) {
   }
 }
 
+function makeRandomData(size) {
+  const data = new Uint8Array(size);
+  for (let i = 0; i < data.length; i += 4) {
+    const v = Math.random() * 0x100000000;
+    data[i]     =  v         & 0xff;
+    data[i + 1] = (v >>  8) & 0xff;
+    data[i + 2] = (v >> 16) & 0xff;
+    data[i + 3] = (v >> 24) & 0xff;
+  }
+  return data;
+}
+
 async function runUpload(signal) {
   const mb        = parseInt(sizeEl.value);
   const unlimited = mb === 0;
@@ -209,50 +221,58 @@ async function runUpload(signal) {
   ulChart.reset();
   setRunning(cardUl, valUl, progUl);
 
-  // Generate random-ish chunk once
-  const data = new Uint8Array(chunkSize);
-  for (let i = 0; i < data.length; i += 4) {
-    const v = Math.random() * 0x100000000;
-    data[i]     =  v         & 0xff;
-    data[i + 1] = (v >>  8) & 0xff;
-    data[i + 2] = (v >> 16) & 0xff;
-    data[i + 3] = (v >> 24) & 0xff;
-  }
+  const data          = makeRandomData(chunkSize);
+  const t0            = performance.now();
+  let   prevBytes     = 0; // bytes from already-completed chunks
+  let   lastSampleSec = 0;
 
-  let totalBytes = 0;
-  let totalSec   = 0;
+  // XHR gives us upload.onprogress — fetch() does not
+  const sendChunk = () => new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      return reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+    }
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/upload');
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
 
-  if (!unlimited) progUl.value = 10;
-
-  const sendChunk = async () => {
-    const t0 = performance.now();
-    await fetch('/upload', {
-      method:  'POST',
-      body:    data,
-      headers: { 'Content-Type': 'application/octet-stream' },
-      cache:   'no-store',
-      signal,
+    xhr.upload.addEventListener('progress', e => {
+      const elapsed = (performance.now() - t0) / 1000;
+      if (elapsed <= 0) return;
+      const bytes = prevBytes + e.loaded;
+      const mbps  = (bytes * 8) / (elapsed * 1e6);
+      valUl.textContent = mbps.toFixed(1);
+      if (!unlimited) progUl.value = (bytes / chunkSize) * 100;
+      if (elapsed - lastSampleSec >= 0.3) {
+        ulChart.push(elapsed, mbps);
+        lastSampleSec = elapsed;
+      }
     });
-    return (performance.now() - t0) / 1000;
-  };
+
+    xhr.addEventListener('load',  () => resolve());
+    xhr.addEventListener('error', () => reject(new Error('XHR upload failed')));
+    xhr.addEventListener('abort', () =>
+      reject(Object.assign(new Error('Aborted'), { name: 'AbortError' })));
+    signal?.addEventListener('abort', () => xhr.abort(), { once: true });
+
+    xhr.send(data);
+  });
 
   try {
     if (unlimited) {
       while (!signal?.aborted) {
-        const elapsed = await sendChunk();
-        totalBytes += chunkSize;
-        totalSec   += elapsed;
-        const mbps  = (totalBytes * 8) / (totalSec * 1e6);
-        ulChart.push(totalSec, mbps);
+        await sendChunk();
+        prevBytes += chunkSize;
+        const elapsed = (performance.now() - t0) / 1000;
+        const mbps    = (prevBytes * 8) / (elapsed * 1e6);
+        ulChart.push(elapsed, mbps);
+        lastSampleSec = elapsed;
         valUl.textContent = mbps.toFixed(1);
       }
     } else {
-      const elapsed = await sendChunk();
-      totalBytes = chunkSize;
-      totalSec   = elapsed;
-      const mbps  = (totalBytes * 8) / (totalSec * 1e6);
-      ulChart.push(0, 0);
-      ulChart.push(totalSec, mbps);
+      await sendChunk();
+      const elapsed = (performance.now() - t0) / 1000;
+      const mbps    = (chunkSize * 8) / (elapsed * 1e6);
+      ulChart.push(elapsed, mbps);
       progUl.value = 100;
       setDone(cardUl, valUl, mbps.toFixed(1));
       return;
@@ -261,8 +281,9 @@ async function runUpload(signal) {
     if (e.name !== 'AbortError') throw e;
   }
 
-  if (totalBytes > 0) {
-    const mbps = (totalBytes * 8) / (totalSec * 1e6);
+  if (prevBytes > 0) {
+    const elapsed = (performance.now() - t0) / 1000;
+    const mbps    = (prevBytes * 8) / (elapsed * 1e6);
     setDone(cardUl, valUl, mbps.toFixed(1));
   }
 }
