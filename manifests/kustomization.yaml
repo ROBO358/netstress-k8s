@@ -14,4 +14,4 @@ resources:
 
 images:
 - name: ghcr.io/robo358/netstress-k8s
-  newTag: sha-826dce4
+  newTag: sha-c49d4cc
