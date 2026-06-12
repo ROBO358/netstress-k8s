@@ -1,19 +1,15 @@
 'use strict';
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-
-const WARMUP_S  = 2;    // seconds to discard from the beginning when computing final average
-const WIN_S     = 1.0;  // sliding window for live mbps display (seconds)
-const CHUNK_MB  = 32;   // XHR upload chunk size (MB per request per stream)
-const SAMPLE_MS = 100;  // meter tick interval (ms)
-
-// ── Chart ─────────────────────────────────────────────────────────────────────
+const WARMUP_S  = 2;
+const WIN_S     = 1.0;
+const CHUNK_MB  = 32;
+const SAMPLE_MS = 100;
 
 class SpeedChart {
   constructor(canvasId, color) {
     this.canvas  = document.getElementById(canvasId);
     this.color   = color;
-    this.samples = []; // [{t, mbps}]
+    this.samples = [];
   }
 
   reset() { this.samples = []; this._draw(); }
@@ -34,7 +30,6 @@ class SpeedChart {
     const cW  = W - PAD.l - PAD.r;
     const cH  = H - PAD.t - PAD.b;
 
-    // Axes
     ctx.strokeStyle = '#2e3144';
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -54,7 +49,6 @@ class SpeedChart {
 
     ctx.font = '9px sans-serif';
 
-    // Horizontal grid lines + Y labels
     for (let i = 0; i <= 4; i++) {
       const y   = PAD.t + (cH / 4) * i;
       const val = Math.round(yMax * (1 - i / 4));
@@ -67,7 +61,6 @@ class SpeedChart {
       ctx.fillText(val, PAD.l - 4, y);
     }
 
-    // X labels
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     const ticks = Math.min(5, samples.length - 1);
@@ -77,7 +70,6 @@ class SpeedChart {
       ctx.fillText(t.toFixed(1) + 's', xOf(t), PAD.t + cH + 4);
     }
 
-    // Fill area
     ctx.beginPath();
     samples.forEach(({ t, mbps }, i) => {
       i === 0 ? ctx.moveTo(xOf(t), yOf(mbps)) : ctx.lineTo(xOf(t), yOf(mbps));
@@ -88,7 +80,6 @@ class SpeedChart {
     ctx.fillStyle = color + '28';
     ctx.fill();
 
-    // Line
     ctx.beginPath();
     samples.forEach(({ t, mbps }, i) => {
       i === 0 ? ctx.moveTo(xOf(t), yOf(mbps)) : ctx.lineTo(xOf(t), yOf(mbps));
@@ -100,14 +91,11 @@ class SpeedChart {
   }
 }
 
-// ── Meter (sliding window throughput) ────────────────────────────────────────
-// Accumulates bytes from parallel streams; ticked by setInterval.
-
 class Meter {
   constructor() {
-    this.ring       = []; // [{t, cumBytes}] circular buffer for sliding window
-    this.cumBytes   = 0;
-    this.warmupBytes = null; // cumBytes when warmup period ends
+    this.ring        = [];
+    this.cumBytes    = 0;
+    this.warmupBytes = null;
     this.warmupT     = null;
   }
 
@@ -116,12 +104,9 @@ class Meter {
   }
 
   tick(elapsed) {
-    const entry = { t: elapsed, b: this.cumBytes };
-    this.ring.push(entry);
+    this.ring.push({ t: elapsed, b: this.cumBytes });
 
-    // Track warmup boundary
     if (this.warmupBytes === null && elapsed >= WARMUP_S) {
-      // Find the sample closest to WARMUP_S
       const wEntry = this.ring.find(e => e.t >= WARMUP_S);
       if (wEntry) {
         this.warmupBytes = wEntry.b;
@@ -129,19 +114,16 @@ class Meter {
       }
     }
 
-    // Trim ring to keep only last WIN_S * 3 seconds
     const cutoff = elapsed - WIN_S * 3;
     while (this.ring.length > 2 && this.ring[0].t < cutoff) {
       this.ring.shift();
     }
   }
 
-  // Instantaneous Mbps over the last WIN_S seconds
   liveMbps() {
     if (this.ring.length < 2) return 0;
-    const now  = this.ring[this.ring.length - 1];
-    // Find oldest sample within WIN_S
-    let oldest = this.ring[0];
+    const now    = this.ring[this.ring.length - 1];
+    let   oldest = this.ring[0];
     for (const e of this.ring) {
       if (now.t - e.t <= WIN_S) { oldest = e; break; }
     }
@@ -150,10 +132,9 @@ class Meter {
     return (now.b - oldest.b) * 8 / (dt * 1e6);
   }
 
-  // Final average Mbps, excluding warmup period
   finalMbps(totalElapsed) {
     if (this.warmupBytes === null) {
-      // Test was shorter than warmup — fall back to full average
+      // test shorter than warmup — full average as fallback
       if (totalElapsed <= 0 || this.cumBytes === 0) return 0;
       return this.cumBytes * 8 / (totalElapsed * 1e6);
     }
@@ -163,8 +144,6 @@ class Meter {
     return bytes * 8 / (dt * 1e6);
   }
 }
-
-// ── DOM refs ──────────────────────────────────────────────────────────────────
 
 const durEl     = document.getElementById('duration');
 const streamsEl = document.getElementById('streams');
@@ -184,8 +163,6 @@ const cardDl    = document.getElementById('card-dl');
 const cardUl    = document.getElementById('card-ul');
 const dlChart   = new SpeedChart('chart-dl', '#4f8ef7');
 const ulChart   = new SpeedChart('chart-ul', '#4ade80');
-
-// ── State ─────────────────────────────────────────────────────────────────────
 
 let abort = null;
 
@@ -214,8 +191,6 @@ function setDone(card, valEl, result) {
   valEl.textContent = result;
 }
 
-// ── Random data ───────────────────────────────────────────────────────────────
-
 function makeRandomData(size) {
   const data = new Uint8Array(size);
   for (let i = 0; i < data.length; i += 4) {
@@ -228,14 +203,18 @@ function makeRandomData(size) {
   return data;
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+function anyAbort(signals) {
+  const ac = new AbortController();
+  for (const sig of signals) {
+    if (sig.aborted) { ac.abort(); break; }
+    sig.addEventListener('abort', () => ac.abort(), { once: true });
+  }
+  return ac.signal;
+}
 
 async function runPing() {
   setRunning(cardPing, valPing, null);
-
-  // Warmup: one throw-away request to establish connection
   try { await fetch('/ping', { cache: 'no-store' }); } catch (_) {}
-
   const samples = [];
   for (let i = 0; i < 10; i++) {
     const t0 = performance.now();
@@ -243,10 +222,8 @@ async function runPing() {
     samples.push(performance.now() - t0);
     if (i < 9) await new Promise(r => setTimeout(r, 50));
   }
-
   const min    = Math.min(...samples);
-  const max    = Math.max(...samples);
-  const jitter = max - min;
+  const jitter = Math.max(...samples) - min;
   setDone(cardPing, valPing, `${min.toFixed(1)} (±${jitter.toFixed(1)})`);
 }
 
@@ -261,23 +238,15 @@ async function runDownload(signal) {
   const meter = new Meter();
   const t0    = performance.now();
   let lastChartSec = 0;
-  let abortedByTimer = false;
 
-  // Duration timer
-  let timerHandle = null;
-  let timerAC     = null;
+  let timerAC = null;
   if (!unlim) {
     timerAC = new AbortController();
-    timerHandle = setTimeout(() => {
-      abortedByTimer = true;
-      timerAC.abort();
-    }, dur * 1000);
+    setTimeout(() => timerAC.abort(), dur * 1000);
   }
-
   const combinedSignal = unlim ? signal : anyAbort([signal, timerAC.signal]);
 
-  // Ticker: update live display
-  let tickHandle = setInterval(() => {
+  const tickHandle = setInterval(() => {
     const elapsed = (performance.now() - t0) / 1000;
     meter.tick(elapsed);
     const mbps = meter.liveMbps();
@@ -289,7 +258,6 @@ async function runDownload(signal) {
     }
   }, SAMPLE_MS);
 
-  // Download workers (one fetch per stream)
   const workers = Array.from({ length: streams }, async () => {
     try {
       const resp   = await fetch('/download?size=0', { cache: 'no-store', signal: combinedSignal });
@@ -308,7 +276,6 @@ async function runDownload(signal) {
     await Promise.all(workers);
   } finally {
     clearInterval(tickHandle);
-    if (timerHandle) clearTimeout(timerHandle);
   }
 
   const elapsed = (performance.now() - t0) / 1000;
@@ -320,37 +287,29 @@ async function runDownload(signal) {
 }
 
 async function runUpload(signal) {
-  const dur     = getDuration();
-  const streams = getStreams();
-  const unlim   = dur === 0;
+  const dur       = getDuration();
+  const streams   = getStreams();
+  const unlim     = dur === 0;
   const chunkSize = CHUNK_MB * 1024 * 1024;
 
   ulChart.reset();
   setRunning(cardUl, valUl, progUl);
 
-  const meter = new Meter();
-  const t0    = performance.now();
+  const meter      = new Meter();
+  const t0         = performance.now();
   let lastChartSec = 0;
-  let abortedByTimer = false;
 
-  // Shared data blob — all XHRs read it concurrently (safe, read-only)
+  // passing the same Uint8Array to multiple XHR.send() is safe (read-only send path)
   const sharedData = makeRandomData(chunkSize);
 
-  // Duration timer
-  let timerHandle = null;
-  let timerAC     = null;
+  let timerAC = null;
   if (!unlim) {
     timerAC = new AbortController();
-    timerHandle = setTimeout(() => {
-      abortedByTimer = true;
-      timerAC.abort();
-    }, dur * 1000);
+    setTimeout(() => timerAC.abort(), dur * 1000);
   }
-
   const stopSignal = unlim ? signal : anyAbort([signal, timerAC.signal]);
 
-  // Ticker: update live display
-  let tickHandle = setInterval(() => {
+  const tickHandle = setInterval(() => {
     const elapsed = (performance.now() - t0) / 1000;
     meter.tick(elapsed);
     const mbps = meter.liveMbps();
@@ -362,7 +321,6 @@ async function runUpload(signal) {
     }
   }, SAMPLE_MS);
 
-  // Upload worker: keeps sending chunks until aborted
   const uploadWorker = (workerSignal) => new Promise((resolve) => {
     let lastLoaded = 0;
 
@@ -379,10 +337,7 @@ async function runUpload(signal) {
         if (delta > 0) meter.add(delta);
       });
 
-      xhr.addEventListener('load', () => {
-        lastLoaded = 0;
-        sendNext(); // loop: send next chunk immediately
-      });
+      xhr.addEventListener('load',  () => { lastLoaded = 0; sendNext(); });
       xhr.addEventListener('error', () => resolve());
       xhr.addEventListener('abort', () => resolve());
 
@@ -399,7 +354,6 @@ async function runUpload(signal) {
     await Promise.all(workers);
   } finally {
     clearInterval(tickHandle);
-    if (timerHandle) clearTimeout(timerHandle);
   }
 
   const elapsed = (performance.now() - t0) / 1000;
@@ -409,18 +363,6 @@ async function runUpload(signal) {
   if (!unlim) progUl.value = 100;
   setDone(cardUl, valUl, mbps.toFixed(1));
 }
-
-// Helper: combine multiple AbortSignals into one
-function anyAbort(signals) {
-  const ac = new AbortController();
-  for (const sig of signals) {
-    if (sig.aborted) { ac.abort(); break; }
-    sig.addEventListener('abort', () => ac.abort(), { once: true });
-  }
-  return ac.signal;
-}
-
-// ── Orchestration ─────────────────────────────────────────────────────────────
 
 async function runAll() {
   abort = new AbortController();
@@ -449,8 +391,6 @@ async function runSingle(fn) {
     lockAll(false);
   }
 }
-
-// ── Event listeners ───────────────────────────────────────────────────────────
 
 btnAll.addEventListener('click',  () => runAll());
 btnPing.addEventListener('click', () => runSingle(runPing));
