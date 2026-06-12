@@ -57,7 +57,7 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", strconv.FormatInt(total, 10))
 	}
 
-	const chunkSize = 64 * 1024
+	const chunkSize = 256 * 1024
 	buf := make([]byte, chunkSize)
 	rand.Read(buf)
 
@@ -78,7 +78,7 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return
 		}
-		if canFlush && unlimited {
+		if canFlush {
 			flusher.Flush()
 		}
 	}
@@ -101,7 +101,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	n, err := io.Copy(io.Discard, r.Body)
 	if err != nil {
-		http.Error(w, "read error", http.StatusInternalServerError)
+		// client abort is normal; don't return 500
 		return
 	}
 

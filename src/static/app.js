@@ -1,11 +1,18 @@
 'use strict';
 
-// ── Chart ────────────────────────────────────────────────────────────────────
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+const WARMUP_S  = 2;    // seconds to discard from the beginning when computing final average
+const WIN_S     = 1.0;  // sliding window for live mbps display (seconds)
+const CHUNK_MB  = 32;   // XHR upload chunk size (MB per request per stream)
+const SAMPLE_MS = 100;  // meter tick interval (ms)
+
+// ── Chart ─────────────────────────────────────────────────────────────────────
 
 class SpeedChart {
   constructor(canvasId, color) {
-    this.canvas = document.getElementById(canvasId);
-    this.color  = color;
+    this.canvas  = document.getElementById(canvasId);
+    this.color   = color;
     this.samples = []; // [{t, mbps}]
   }
 
@@ -24,8 +31,8 @@ class SpeedChart {
     ctx.scale(dpr, dpr);
 
     const PAD = { t: 6, r: 6, b: 22, l: 42 };
-    const cW = W - PAD.l - PAD.r;
-    const cH = H - PAD.t - PAD.b;
+    const cW  = W - PAD.l - PAD.r;
+    const cH  = H - PAD.t - PAD.b;
 
     // Axes
     ctx.strokeStyle = '#2e3144';
@@ -93,9 +100,74 @@ class SpeedChart {
   }
 }
 
+// ── Meter (sliding window throughput) ────────────────────────────────────────
+// Accumulates bytes from parallel streams; ticked by setInterval.
+
+class Meter {
+  constructor() {
+    this.ring       = []; // [{t, cumBytes}] circular buffer for sliding window
+    this.cumBytes   = 0;
+    this.warmupBytes = null; // cumBytes when warmup period ends
+    this.warmupT     = null;
+  }
+
+  add(bytes) {
+    this.cumBytes += bytes;
+  }
+
+  tick(elapsed) {
+    const entry = { t: elapsed, b: this.cumBytes };
+    this.ring.push(entry);
+
+    // Track warmup boundary
+    if (this.warmupBytes === null && elapsed >= WARMUP_S) {
+      // Find the sample closest to WARMUP_S
+      const wEntry = this.ring.find(e => e.t >= WARMUP_S);
+      if (wEntry) {
+        this.warmupBytes = wEntry.b;
+        this.warmupT     = wEntry.t;
+      }
+    }
+
+    // Trim ring to keep only last WIN_S * 3 seconds
+    const cutoff = elapsed - WIN_S * 3;
+    while (this.ring.length > 2 && this.ring[0].t < cutoff) {
+      this.ring.shift();
+    }
+  }
+
+  // Instantaneous Mbps over the last WIN_S seconds
+  liveMbps() {
+    if (this.ring.length < 2) return 0;
+    const now  = this.ring[this.ring.length - 1];
+    // Find oldest sample within WIN_S
+    let oldest = this.ring[0];
+    for (const e of this.ring) {
+      if (now.t - e.t <= WIN_S) { oldest = e; break; }
+    }
+    const dt = now.t - oldest.t;
+    if (dt <= 0) return 0;
+    return (now.b - oldest.b) * 8 / (dt * 1e6);
+  }
+
+  // Final average Mbps, excluding warmup period
+  finalMbps(totalElapsed) {
+    if (this.warmupBytes === null) {
+      // Test was shorter than warmup — fall back to full average
+      if (totalElapsed <= 0 || this.cumBytes === 0) return 0;
+      return this.cumBytes * 8 / (totalElapsed * 1e6);
+    }
+    const bytes = this.cumBytes - this.warmupBytes;
+    const dt    = totalElapsed - this.warmupT;
+    if (dt <= 0 || bytes <= 0) return 0;
+    return bytes * 8 / (dt * 1e6);
+  }
+}
+
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 
-const sizeEl    = document.getElementById('size');
+const durEl     = document.getElementById('duration');
+const streamsEl = document.getElementById('streams');
 const simEl     = document.getElementById('simultaneous');
 const btnAll    = document.getElementById('btn-all');
 const btnStop   = document.getElementById('btn-stop');
@@ -117,11 +189,13 @@ const ulChart   = new SpeedChart('chart-ul', '#4ade80');
 
 let abort = null;
 
-const isUnlimited = () => parseInt(sizeEl.value) === 0;
+const getDuration = () => parseInt(durEl.value);
+const getStreams  = () => parseInt(streamsEl.value);
+const isUnlimited = () => getDuration() === 0;
 
 function lockAll(locked) {
-  [btnAll, btnPing, btnDl, btnUl, sizeEl, simEl].forEach(el => el.disabled = locked);
-  btnStop.hidden = !(locked && isUnlimited());
+  [btnAll, btnPing, btnDl, btnUl, durEl, streamsEl, simEl].forEach(el => el.disabled = locked);
+  btnStop.hidden = !locked;
 }
 
 function setRunning(card, valEl, progEl) {
@@ -140,152 +214,210 @@ function setDone(card, valEl, result) {
   valEl.textContent = result;
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
-async function runPing() {
-  setRunning(cardPing, valPing, null);
-  const samples = [];
-  for (let i = 0; i < 5; i++) {
-    const t0 = performance.now();
-    await fetch('/ping', { cache: 'no-store' });
-    samples.push(performance.now() - t0);
-    if (i < 4) await new Promise(r => setTimeout(r, 100));
-  }
-  const avg = samples.reduce((a, b) => a + b, 0) / samples.length;
-  setDone(cardPing, valPing, avg.toFixed(1));
-}
-
-async function runDownload(signal) {
-  const mb        = parseInt(sizeEl.value);
-  const unlimited = mb === 0;
-  const total     = unlimited ? Infinity : mb * 1024 * 1024;
-
-  dlChart.reset();
-  setRunning(cardDl, valDl, progDl);
-
-  const t0          = performance.now();
-  let received      = 0;
-  let lastSampleSec = 0;
-
-  try {
-    const resp   = await fetch(`/download?size=${mb}`, { cache: 'no-store', signal });
-    const reader = resp.body.getReader();
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      received += value.length;
-
-      const elapsed = (performance.now() - t0) / 1000;
-      const mbps    = (received * 8) / (elapsed * 1e6);
-
-      valDl.textContent = mbps.toFixed(1);
-      if (!unlimited) progDl.value = (received / total) * 100;
-
-      if (elapsed - lastSampleSec >= 0.3) {
-        dlChart.push(elapsed, mbps);
-        lastSampleSec = elapsed;
-      }
-    }
-  } catch (e) {
-    if (e.name !== 'AbortError') throw e;
-  }
-
-  const elapsed = (performance.now() - t0) / 1000;
-  if (received > 0 && elapsed > 0) {
-    const mbps = (received * 8) / (elapsed * 1e6);
-    dlChart.push(elapsed, mbps);
-    if (!unlimited) progDl.value = 100;
-    setDone(cardDl, valDl, mbps.toFixed(1));
-  }
-}
+// ── Random data ───────────────────────────────────────────────────────────────
 
 function makeRandomData(size) {
   const data = new Uint8Array(size);
   for (let i = 0; i < data.length; i += 4) {
-    const v = Math.random() * 0x100000000;
+    const v    = Math.random() * 0x100000000;
     data[i]     =  v         & 0xff;
-    data[i + 1] = (v >>  8) & 0xff;
-    data[i + 2] = (v >> 16) & 0xff;
-    data[i + 3] = (v >> 24) & 0xff;
+    data[i + 1] = (v >>  8)  & 0xff;
+    data[i + 2] = (v >> 16)  & 0xff;
+    data[i + 3] = (v >> 24)  & 0xff;
   }
   return data;
 }
 
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+async function runPing() {
+  setRunning(cardPing, valPing, null);
+
+  // Warmup: one throw-away request to establish connection
+  try { await fetch('/ping', { cache: 'no-store' }); } catch (_) {}
+
+  const samples = [];
+  for (let i = 0; i < 10; i++) {
+    const t0 = performance.now();
+    await fetch('/ping', { cache: 'no-store' });
+    samples.push(performance.now() - t0);
+    if (i < 9) await new Promise(r => setTimeout(r, 50));
+  }
+
+  const min    = Math.min(...samples);
+  const max    = Math.max(...samples);
+  const jitter = max - min;
+  setDone(cardPing, valPing, `${min.toFixed(1)} (±${jitter.toFixed(1)})`);
+}
+
+async function runDownload(signal) {
+  const dur     = getDuration();
+  const streams = getStreams();
+  const unlim   = dur === 0;
+
+  dlChart.reset();
+  setRunning(cardDl, valDl, progDl);
+
+  const meter = new Meter();
+  const t0    = performance.now();
+  let lastChartSec = 0;
+  let abortedByTimer = false;
+
+  // Duration timer
+  let timerHandle = null;
+  let timerAC     = null;
+  if (!unlim) {
+    timerAC = new AbortController();
+    timerHandle = setTimeout(() => {
+      abortedByTimer = true;
+      timerAC.abort();
+    }, dur * 1000);
+  }
+
+  const combinedSignal = unlim ? signal : anyAbort([signal, timerAC.signal]);
+
+  // Ticker: update live display
+  let tickHandle = setInterval(() => {
+    const elapsed = (performance.now() - t0) / 1000;
+    meter.tick(elapsed);
+    const mbps = meter.liveMbps();
+    valDl.textContent = mbps.toFixed(1);
+    if (!unlim) progDl.value = Math.min((elapsed / dur) * 100, 100);
+    if (elapsed - lastChartSec >= 0.3) {
+      dlChart.push(elapsed, mbps);
+      lastChartSec = elapsed;
+    }
+  }, SAMPLE_MS);
+
+  // Download workers (one fetch per stream)
+  const workers = Array.from({ length: streams }, async () => {
+    try {
+      const resp   = await fetch('/download?size=0', { cache: 'no-store', signal: combinedSignal });
+      const reader = resp.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        meter.add(value.length);
+      }
+    } catch (e) {
+      if (e.name !== 'AbortError') throw e;
+    }
+  });
+
+  try {
+    await Promise.all(workers);
+  } finally {
+    clearInterval(tickHandle);
+    if (timerHandle) clearTimeout(timerHandle);
+  }
+
+  const elapsed = (performance.now() - t0) / 1000;
+  meter.tick(elapsed);
+  const mbps = meter.finalMbps(elapsed);
+  dlChart.push(elapsed, mbps);
+  if (!unlim) progDl.value = 100;
+  setDone(cardDl, valDl, mbps.toFixed(1));
+}
+
 async function runUpload(signal) {
-  const mb        = parseInt(sizeEl.value);
-  const unlimited = mb === 0;
-  const chunkMB   = unlimited ? 50 : mb;
-  const chunkSize = chunkMB * 1024 * 1024;
+  const dur     = getDuration();
+  const streams = getStreams();
+  const unlim   = dur === 0;
+  const chunkSize = CHUNK_MB * 1024 * 1024;
 
   ulChart.reset();
   setRunning(cardUl, valUl, progUl);
 
-  const data          = makeRandomData(chunkSize);
-  const t0            = performance.now();
-  let   prevBytes     = 0; // bytes from already-completed chunks
-  let   lastSampleSec = 0;
+  const meter = new Meter();
+  const t0    = performance.now();
+  let lastChartSec = 0;
+  let abortedByTimer = false;
 
-  // XHR gives us upload.onprogress — fetch() does not
-  const sendChunk = () => new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      return reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+  // Shared data blob — all XHRs read it concurrently (safe, read-only)
+  const sharedData = makeRandomData(chunkSize);
+
+  // Duration timer
+  let timerHandle = null;
+  let timerAC     = null;
+  if (!unlim) {
+    timerAC = new AbortController();
+    timerHandle = setTimeout(() => {
+      abortedByTimer = true;
+      timerAC.abort();
+    }, dur * 1000);
+  }
+
+  const stopSignal = unlim ? signal : anyAbort([signal, timerAC.signal]);
+
+  // Ticker: update live display
+  let tickHandle = setInterval(() => {
+    const elapsed = (performance.now() - t0) / 1000;
+    meter.tick(elapsed);
+    const mbps = meter.liveMbps();
+    valUl.textContent = mbps.toFixed(1);
+    if (!unlim) progUl.value = Math.min((elapsed / dur) * 100, 100);
+    if (elapsed - lastChartSec >= 0.3) {
+      ulChart.push(elapsed, mbps);
+      lastChartSec = elapsed;
     }
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/upload');
-    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+  }, SAMPLE_MS);
 
-    xhr.upload.addEventListener('progress', e => {
-      const elapsed = (performance.now() - t0) / 1000;
-      if (elapsed <= 0) return;
-      const bytes = prevBytes + e.loaded;
-      const mbps  = (bytes * 8) / (elapsed * 1e6);
-      valUl.textContent = mbps.toFixed(1);
-      if (!unlimited) progUl.value = (bytes / chunkSize) * 100;
-      if (elapsed - lastSampleSec >= 0.3) {
-        ulChart.push(elapsed, mbps);
-        lastSampleSec = elapsed;
-      }
-    });
+  // Upload worker: keeps sending chunks until aborted
+  const uploadWorker = (workerSignal) => new Promise((resolve) => {
+    let lastLoaded = 0;
 
-    xhr.addEventListener('load',  () => resolve());
-    xhr.addEventListener('error', () => reject(new Error('XHR upload failed')));
-    xhr.addEventListener('abort', () =>
-      reject(Object.assign(new Error('Aborted'), { name: 'AbortError' })));
-    signal?.addEventListener('abort', () => xhr.abort(), { once: true });
+    const sendNext = () => {
+      if (workerSignal.aborted) { resolve(); return; }
 
-    xhr.send(data);
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/upload');
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+
+      xhr.upload.addEventListener('progress', e => {
+        const delta = e.loaded - lastLoaded;
+        lastLoaded  = e.loaded;
+        if (delta > 0) meter.add(delta);
+      });
+
+      xhr.addEventListener('load', () => {
+        lastLoaded = 0;
+        sendNext(); // loop: send next chunk immediately
+      });
+      xhr.addEventListener('error', () => resolve());
+      xhr.addEventListener('abort', () => resolve());
+
+      workerSignal.addEventListener('abort', () => xhr.abort(), { once: true });
+      xhr.send(sharedData);
+    };
+
+    sendNext();
   });
 
+  const workers = Array.from({ length: streams }, () => uploadWorker(stopSignal));
+
   try {
-    if (unlimited) {
-      while (!signal?.aborted) {
-        await sendChunk();
-        prevBytes += chunkSize;
-        const elapsed = (performance.now() - t0) / 1000;
-        const mbps    = (prevBytes * 8) / (elapsed * 1e6);
-        ulChart.push(elapsed, mbps);
-        lastSampleSec = elapsed;
-        valUl.textContent = mbps.toFixed(1);
-      }
-    } else {
-      await sendChunk();
-      const elapsed = (performance.now() - t0) / 1000;
-      const mbps    = (chunkSize * 8) / (elapsed * 1e6);
-      ulChart.push(elapsed, mbps);
-      progUl.value = 100;
-      setDone(cardUl, valUl, mbps.toFixed(1));
-      return;
-    }
-  } catch (e) {
-    if (e.name !== 'AbortError') throw e;
+    await Promise.all(workers);
+  } finally {
+    clearInterval(tickHandle);
+    if (timerHandle) clearTimeout(timerHandle);
   }
 
-  if (prevBytes > 0) {
-    const elapsed = (performance.now() - t0) / 1000;
-    const mbps    = (prevBytes * 8) / (elapsed * 1e6);
-    setDone(cardUl, valUl, mbps.toFixed(1));
+  const elapsed = (performance.now() - t0) / 1000;
+  meter.tick(elapsed);
+  const mbps = meter.finalMbps(elapsed);
+  ulChart.push(elapsed, mbps);
+  if (!unlim) progUl.value = 100;
+  setDone(cardUl, valUl, mbps.toFixed(1));
+}
+
+// Helper: combine multiple AbortSignals into one
+function anyAbort(signals) {
+  const ac = new AbortController();
+  for (const sig of signals) {
+    if (sig.aborted) { ac.abort(); break; }
+    sig.addEventListener('abort', () => ac.abort(), { once: true });
   }
+  return ac.signal;
 }
 
 // ── Orchestration ─────────────────────────────────────────────────────────────
@@ -304,7 +436,6 @@ async function runAll() {
   } finally {
     abort = null;
     lockAll(false);
-    btnStop.hidden = true;
   }
 }
 
@@ -316,7 +447,6 @@ async function runSingle(fn) {
   } finally {
     abort = null;
     lockAll(false);
-    btnStop.hidden = true;
   }
 }
 
