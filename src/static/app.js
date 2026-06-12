@@ -171,7 +171,9 @@ const getStreams  = () => parseInt(streamsEl.value);
 const isUnlimited = () => getDuration() === 0;
 
 function lockAll(locked) {
-  [btnAll, btnPing, btnDl, btnUl, durEl, streamsEl, simEl].forEach(el => el.disabled = locked);
+  [btnAll, btnPing, btnDl, btnUl, durEl, streamsEl, simEl]
+    .filter(Boolean)
+    .forEach(el => { el.disabled = locked; });
   btnStop.hidden = !locked;
 }
 

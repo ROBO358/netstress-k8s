@@ -20,7 +20,11 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/", http.FileServer(http.FS(staticFS)))
+	staticHandler := http.FileServer(http.FS(staticFS))
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		staticHandler.ServeHTTP(w, r)
+	})
 	mux.HandleFunc("/ping", handlePing)
 	mux.HandleFunc("/download", handleDownload)
 	mux.HandleFunc("/upload", handleUpload)
